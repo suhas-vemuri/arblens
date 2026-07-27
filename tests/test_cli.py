@@ -22,3 +22,5 @@ def test_cli_reports_average_bid_ask_spread() -> None:
     )
 
     assert "Average bid-ask spread: 0.7987" in result.stdout
+    assert "Quote errors: 0" in result.stdout
+    assert "Quote warnings: 1" in result.stdout

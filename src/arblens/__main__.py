@@ -18,6 +18,8 @@ def main() -> None:
 
     raw = load_chain(args.path)
     cleaned, issues = clean_quotes(raw)
+    error_count = sum(issue.severity == "error" for issue in issues)
+    warning_count = sum(issue.severity == "warning" for issue in issues)
     if cleaned.empty:
         average_spread = 0.0
     else:
@@ -33,6 +35,8 @@ def main() -> None:
     print(f"Raw rows: {len(raw)}")
     print(f"Clean rows: {len(cleaned)}")
     print(f"Quote issues: {len(issues)}")
+    print(f"Quote errors: {error_count}")
+    print(f"Quote warnings: {warning_count}")
     print(f"Average bid-ask spread: {average_spread:.4f}")
     print(f"Violations: {len(violations)}")
     print()
