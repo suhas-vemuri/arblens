@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from math import isfinite
 
 import pandas as pd
 
@@ -15,6 +16,18 @@ REQUIRED_COLUMNS = {
     "ask",
 }
 
+DEFAULT_MAX_RELATIVE_SPREAD = 1.0
+
+
+def _parse_finite_float(value: object) -> float | None:
+    """Convert a value to a finite float, or return None when conversion fails."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    return number if isfinite(number) else None
+
 
 def add_midpoint(frame: pd.DataFrame) -> pd.DataFrame:
     result = frame.copy()
@@ -27,79 +40,212 @@ def validate_quotes(
     *,
     now: datetime | None = None,
     max_quote_age_seconds: float | None = None,
+    max_relative_spread: float | None = DEFAULT_MAX_RELATIVE_SPREAD,
 ) -> list[QuoteIssue]:
     missing_columns = REQUIRED_COLUMNS - set(frame.columns)
     if missing_columns:
         raise ValueError(f"missing required columns: {sorted(missing_columns)}")
 
+    if max_relative_spread is not None and max_relative_spread < 0:
+        raise ValueError("max_relative_spread must be non-negative")
+
     issues: list[QuoteIssue] = []
     current_time = now or datetime.now(UTC)
 
     for index, row in frame.iterrows():
-        bid = row["bid"]
-        ask = row["ask"]
-        strike = row["strike"]
-        option_type = str(row["option_type"]).lower()
+        row_index = int(index)
 
-        if pd.isna(bid) or pd.isna(ask):
-            issues.append(QuoteIssue(index, "missing_quote", "bid or ask is missing"))
-            continue
-        if strike <= 0:
-            issues.append(QuoteIssue(index, "invalid_strike", "strike must be positive"))
-        if bid < 0 or ask <= 0:
-            issues.append(QuoteIssue(index, "invalid_price", "bid must be >= 0 and ask > 0"))
-        if bid > ask:
-            issues.append(QuoteIssue(index, "crossed_market", "bid is greater than ask"))
+        raw_bid = row["bid"]
+        raw_ask = row["ask"]
+
+        bid = _parse_finite_float(raw_bid)
+        ask = _parse_finite_float(raw_ask)
+        strike = _parse_finite_float(row["strike"])
+
+        option_type = str(row["option_type"]).strip().lower()
+        expiration = pd.to_datetime(
+            row["expiration"],
+            errors="coerce",
+            format="mixed",
+        )
+        if bid is None or ask is None:
+            if pd.isna(raw_bid) or pd.isna(raw_ask):
+                issues.append(
+                    QuoteIssue(
+                        row_index,
+                        "missing_quote",
+                        "bid or ask is missing",
+                    )
+                )
+            else:
+                issues.append(
+                    QuoteIssue(
+                        row_index,
+                        "invalid_quote",
+                        "bid and ask must be finite numbers",
+                    )
+                )
+        elif bid < 0 or ask <= 0:
+            issues.append(
+                QuoteIssue(
+                    row_index,
+                    "invalid_price",
+                    "bid must be >= 0 and ask must be > 0",
+                )
+            )
+        elif bid > ask:
+            issues.append(
+                QuoteIssue(
+                    row_index,
+                    "crossed_market",
+                    "bid is greater than ask",
+                )
+            )
+        elif max_relative_spread is not None:
+            midpoint = (bid + ask) / 2.0
+            relative_spread = (ask - bid) / midpoint
+
+            if relative_spread > max_relative_spread:
+                issues.append(
+                    QuoteIssue(
+                        row_index,
+                        "wide_spread",
+                        (
+                            f"relative spread is {relative_spread:.1%}; "
+                            f"limit is {max_relative_spread:.1%}"
+                        ),
+                        severity="warning",
+                    )
+                )
+
+        if strike is None or strike <= 0:
+            issues.append(
+                QuoteIssue(
+                    row_index,
+                    "invalid_strike",
+                    "strike must be a positive finite number",
+                )
+            )
+
         if option_type not in {"call", "put"}:
-            issues.append(QuoteIssue(index, "invalid_option_type", "expected call or put"))
+            issues.append(
+                QuoteIssue(
+                    row_index,
+                    "invalid_option_type",
+                    "expected call or put",
+                )
+            )
+
+        if pd.isna(expiration):
+            issues.append(
+                QuoteIssue(
+                    row_index,
+                    "invalid_expiration",
+                    "expiration date is invalid",
+                )
+            )
 
         if max_quote_age_seconds is not None and "quote_timestamp" in frame.columns:
-            timestamp = pd.to_datetime(row["quote_timestamp"], utc=True, errors="coerce")
+            timestamp = pd.to_datetime(
+                row["quote_timestamp"],
+                utc=True,
+                errors="coerce",
+            )
+
             if pd.isna(timestamp):
-                issues.append(QuoteIssue(index, "invalid_timestamp", "quote timestamp is invalid"))
+                issues.append(
+                    QuoteIssue(
+                        row_index,
+                        "invalid_timestamp",
+                        "quote timestamp is invalid",
+                    )
+                )
             else:
                 age = (current_time - timestamp.to_pydatetime()).total_seconds()
+
                 if age > max_quote_age_seconds:
                     issues.append(
                         QuoteIssue(
-                            index,
+                            row_index,
                             "stale_quote",
                             f"quote is {age:.1f} seconds old",
                             severity="warning",
                         )
                     )
 
-    duplicates = frame.duplicated(
-        subset=["symbol", "expiration", "option_type", "strike"], keep=False
+    normalized_keys = frame[["symbol", "expiration", "option_type", "strike"]].copy()
+
+    normalized_keys["symbol"] = normalized_keys["symbol"].astype(str).str.strip().str.upper()
+    normalized_keys["option_type"] = (
+        normalized_keys["option_type"].astype(str).str.strip().str.lower()
     )
+    normalized_keys["strike"] = pd.to_numeric(
+        normalized_keys["strike"],
+        errors="coerce",
+    )
+    normalized_keys["expiration"] = pd.to_datetime(
+        normalized_keys["expiration"],
+        errors="coerce",
+        format="mixed",
+    ).dt.strftime("%Y-%m-%d")
+
+    duplicates = normalized_keys.duplicated(
+        subset=["symbol", "expiration", "option_type", "strike"],
+        keep=False,
+    )
+
     for index in frame.index[duplicates]:
-        issues.append(QuoteIssue(int(index), "duplicate_contract", "duplicate contract row"))
+        issues.append(
+            QuoteIssue(
+                int(index),
+                "duplicate_contract",
+                "duplicate contract row",
+            )
+        )
 
     return issues
 
 
-def clean_quotes(frame: pd.DataFrame) -> tuple[pd.DataFrame, list[QuoteIssue]]:
-    """Return an analysis-safe frame and a complete issue log.
+def clean_quotes(
+    frame: pd.DataFrame,
+    *,
+    max_relative_spread: float | None = DEFAULT_MAX_RELATIVE_SPREAD,
+) -> tuple[pd.DataFrame, list[QuoteIssue]]:
+    """Return an analysis-safe frame and a complete issue log."""
+    issues = validate_quotes(
+        frame,
+        max_relative_spread=max_relative_spread,
+    )
 
-    Version 0.1 removes rows with structurally invalid quotes. Staleness is logged
-    separately by callers because historical replay intentionally uses older quotes.
-    """
-    issues = validate_quotes(frame)
-    invalid_indices = {
-        issue.row_index
-        for issue in issues
-        if issue.code
-        in {
-            "missing_quote",
-            "invalid_strike",
-            "invalid_price",
-            "crossed_market",
-            "invalid_option_type",
-            "duplicate_contract",
-        }
+    invalid_codes = {
+        "missing_quote",
+        "invalid_quote",
+        "invalid_strike",
+        "invalid_price",
+        "crossed_market",
+        "invalid_option_type",
+        "invalid_expiration",
+        "duplicate_contract",
     }
+
+    invalid_indices = {issue.row_index for issue in issues if issue.code in invalid_codes}
+
     cleaned = frame.drop(index=list(invalid_indices)).copy()
-    cleaned["option_type"] = cleaned["option_type"].str.lower()
+
+    cleaned["symbol"] = cleaned["symbol"].astype(str).str.strip().str.upper()
+    cleaned["option_type"] = cleaned["option_type"].astype(str).str.strip().str.lower()
+
+    cleaned["strike"] = pd.to_numeric(cleaned["strike"], errors="coerce")
+    cleaned["bid"] = pd.to_numeric(cleaned["bid"], errors="coerce")
+    cleaned["ask"] = pd.to_numeric(cleaned["ask"], errors="coerce")
+
+    cleaned["expiration"] = pd.to_datetime(
+        cleaned["expiration"],
+        errors="coerce",
+        format="mixed",
+    ).dt.strftime("%Y-%m-%d")
+
     cleaned = add_midpoint(cleaned)
     cleaned = cleaned.sort_values(["expiration", "option_type", "strike"]).reset_index(drop=True)
+
     return cleaned, issues
