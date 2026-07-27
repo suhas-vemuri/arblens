@@ -144,7 +144,31 @@ def validate_quotes(
                     "expiration date is invalid",
                 )
             )
+        if "volume" in frame.columns:
+            volume = _parse_finite_float(row["volume"])
 
+            if volume == 0:
+                issues.append(
+                    QuoteIssue(
+                        row_index,
+                        "zero_volume",
+                        "trading volume is zero",
+                        severity="warning",
+                    )
+                )
+
+        if "open_interest" in frame.columns:
+            open_interest = _parse_finite_float(row["open_interest"])
+
+            if open_interest == 0:
+                issues.append(
+                    QuoteIssue(
+                        row_index,
+                        "zero_open_interest",
+                        "open interest is zero",
+                        severity="warning",
+                    )
+                )
         if max_quote_age_seconds is not None and "quote_timestamp" in frame.columns:
             timestamp = pd.to_datetime(
                 row["quote_timestamp"],
@@ -158,6 +182,7 @@ def validate_quotes(
                         row_index,
                         "invalid_timestamp",
                         "quote timestamp is invalid",
+                        severity="warning",
                     )
                 )
             else:
@@ -209,11 +234,15 @@ def validate_quotes(
 def clean_quotes(
     frame: pd.DataFrame,
     *,
+    now: datetime | None = None,
+    max_quote_age_seconds: float | None = None,
     max_relative_spread: float | None = DEFAULT_MAX_RELATIVE_SPREAD,
 ) -> tuple[pd.DataFrame, list[QuoteIssue]]:
     """Return an analysis-safe frame and a complete issue log."""
     issues = validate_quotes(
         frame,
+        now=now,
+        max_quote_age_seconds=max_quote_age_seconds,
         max_relative_spread=max_relative_spread,
     )
 
