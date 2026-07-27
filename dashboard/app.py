@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import asdict
 from pathlib import Path
-import sys
 
 import pandas as pd
 import plotly.express as px
@@ -44,8 +44,12 @@ violations = run_all_checks(
 )
 violations_frame = violations_to_frame(violations)
 
-midpoint_count = int((violations_frame["price_basis"] == "midpoint").sum()) if not violations_frame.empty else 0
-bid_ask_count = int((violations_frame["price_basis"] == "bid_ask").sum()) if not violations_frame.empty else 0
+midpoint_count = (
+    int((violations_frame["price_basis"] == "midpoint").sum()) if not violations_frame.empty else 0
+)
+bid_ask_count = (
+    int((violations_frame["price_basis"] == "bid_ask").sum()) if not violations_frame.empty else 0
+)
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Raw contracts", len(raw))
@@ -53,8 +57,9 @@ col2.metric("Clean contracts", len(cleaned))
 col3.metric("Midpoint anomalies", midpoint_count)
 col4.metric("Bid/ask survivors", bid_ask_count)
 
-st.info(
-    "A midpoint anomaly is only a warning. A bid/ask survivor is stronger, but still does not prove that a live order would fill or remain profitable after fees."
+st.caption(
+    "Bid/ask survivors are stronger, but they still do not prove that "
+    "a live order would fill or remain profitable after fees."
 )
 
 left, right = st.columns([1.35, 1.0])
@@ -112,6 +117,7 @@ st.markdown(
 2. **Clean contracts** remain after structurally invalid records are removed.
 3. **Midpoint anomalies** break a mathematical rule using the center of the bid–ask spread.
 4. **Bid/ask survivors** still look inconsistent using executable top-of-book prices.
-5. Version 0.1 does **not** account for fees, latency, margin, or whether a broker would fill the complete strategy.
+5. Version 0.1 does **not** account for fees, latency, margin,
+   or whether a broker would fill the complete strategy.
 """
 )

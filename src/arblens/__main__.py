@@ -18,6 +18,10 @@ def main() -> None:
 
     raw = load_chain(args.path)
     cleaned, issues = clean_quotes(raw)
+    if cleaned.empty:
+        average_spread = 0.0
+    else:
+        average_spread = float((cleaned["ask"] - cleaned["bid"]).mean())
     violations = run_all_checks(
         cleaned,
         spot=args.spot,
@@ -29,6 +33,7 @@ def main() -> None:
     print(f"Raw rows: {len(raw)}")
     print(f"Clean rows: {len(cleaned)}")
     print(f"Quote issues: {len(issues)}")
+    print(f"Average bid-ask spread: {average_spread:.4f}")
     print(f"Violations: {len(violations)}")
     print()
     table = violations_to_frame(violations)
