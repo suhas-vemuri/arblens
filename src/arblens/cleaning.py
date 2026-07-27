@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pandas as pd
 
@@ -33,7 +33,7 @@ def validate_quotes(
         raise ValueError(f"missing required columns: {sorted(missing_columns)}")
 
     issues: list[QuoteIssue] = []
-    current_time = now or datetime.now(timezone.utc)
+    current_time = now or datetime.now(UTC)
 
     for index, row in frame.iterrows():
         bid = row["bid"]

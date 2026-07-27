@@ -120,7 +120,10 @@ def detect_executable_monotonicity_violations(
                             (float(left.strike), float(right.strike)),
                             credit,
                             "bid_ask",
-                            f"buy lower strike at {left.ask:.4f}, sell higher strike at {right.bid:.4f}",
+                            (
+                                f"buy lower strike at {left.ask:.4f}, "
+                                f"sell higher strike at {right.bid:.4f}"
+                            ),
                         )
                     )
             else:
@@ -135,7 +138,10 @@ def detect_executable_monotonicity_violations(
                             (float(left.strike), float(right.strike)),
                             credit,
                             "bid_ask",
-                            f"buy higher strike at {right.ask:.4f}, sell lower strike at {left.bid:.4f}",
+                            (
+                                f"buy higher strike at {right.ask:.4f}, "
+                                f"sell lower strike at {left.bid:.4f}"
+                            ),
                         )
                     )
     return violations

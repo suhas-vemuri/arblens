@@ -51,10 +51,9 @@ def black_scholes_price(
         raise ValueError("option_type must be 'call' or 'put'")
 
     sqrt_t = math.sqrt(time)
-    d1 = (
-        math.log(spot / strike)
-        + (rate - dividend_yield + 0.5 * volatility**2) * time
-    ) / (volatility * sqrt_t)
+    d1 = (math.log(spot / strike) + (rate - dividend_yield + 0.5 * volatility**2) * time) / (
+        volatility * sqrt_t
+    )
     d2 = d1 - volatility * sqrt_t
 
     discounted_spot = spot * math.exp(-dividend_yield * time)
@@ -90,15 +89,18 @@ def implied_volatility(
         raise ValueError("time must be positive for implied-volatility inversion")
 
     def objective(vol: float) -> float:
-        return black_scholes_price(
-            spot=spot,
-            strike=strike,
-            time=time,
-            rate=rate,
-            volatility=vol,
-            option_type=option_type,
-            dividend_yield=dividend_yield,
-        ) - market_price
+        return (
+            black_scholes_price(
+                spot=spot,
+                strike=strike,
+                time=time,
+                rate=rate,
+                volatility=vol,
+                option_type=option_type,
+                dividend_yield=dividend_yield,
+            )
+            - market_price
+        )
 
     low_value = objective(lower_vol)
     high_value = objective(upper_vol)

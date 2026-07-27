@@ -17,7 +17,9 @@ class TradierProvider(OptionChainProvider):
 
     def __init__(self, token: str | None = None, base_url: str | None = None) -> None:
         self.token = token or os.getenv("TRADIER_ACCESS_TOKEN")
-        self.base_url = (base_url or os.getenv("TRADIER_BASE_URL") or "https://api.tradier.com/v1").rstrip("/")
+        self.base_url = (
+            base_url or os.getenv("TRADIER_BASE_URL") or "https://api.tradier.com/v1"
+        ).rstrip("/")
         if not self.token:
             raise ValueError("TRADIER_ACCESS_TOKEN is not configured")
 
