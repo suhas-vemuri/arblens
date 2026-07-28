@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 from arblens.__main__ import main
 from arblens.io import load_chain
@@ -7,18 +8,30 @@ from arblens.io import load_chain
 class FakeProvider:
     """Return controlled data without contacting Tradier."""
 
+    environment = "sandbox"
+
     def __init__(
         self,
         frame: pd.DataFrame,
+        *,
+        expirations: list[str] | None = None,
     ) -> None:
         self.frame = frame
+        self.expirations = expirations or ["2026-08-21"]
+
+    def get_expirations(
+        self,
+        symbol: str,
+    ) -> list[str]:
+        assert symbol.strip().upper() == "SPY"
+        return self.expirations.copy()
 
     def get_chain(
         self,
         symbol: str,
         expiration: str,
     ) -> pd.DataFrame:
-        assert symbol == "SPY"
+        assert symbol.strip().upper() == "SPY"
         assert expiration == "2026-08-21"
 
         return self.frame.copy()
@@ -63,6 +76,7 @@ def test_fetch_command_saves_csv_snapshot(
 
     assert exit_code == 0
     assert len(snapshots) == 1
+    assert "Provider environment: sandbox" in output
     assert "Fetched contracts: 1" in output
     assert "Snapshot saved:" in output
 
@@ -94,4 +108,31 @@ def test_fetch_command_skips_empty_snapshot(
     assert exit_code == 0
     assert "Fetched contracts: 0" in output
     assert "snapshot was not saved" in output
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_fetch_rejects_unavailable_expiration(
+    tmp_path,
+    capsys,
+) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            [
+                "fetch",
+                "SPY",
+                "--expiration",
+                "2026-08-28",
+                "--output-dir",
+                str(tmp_path),
+            ],
+            provider_factory=lambda: FakeProvider(
+                pd.DataFrame(),
+                expirations=["2026-08-21"],
+            ),
+        )
+
+    error_output = capsys.readouterr().err
+
+    assert exc_info.value.code == 2
+    assert ("expiration 2026-08-28 is not available for SPY") in error_output
     assert list(tmp_path.iterdir()) == []

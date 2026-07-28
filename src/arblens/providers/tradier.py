@@ -45,7 +45,7 @@ class TradierProvider(OptionChainProvider):
 
         configured_token = token or os.getenv("TRADIER_ACCESS_TOKEN")
         configured_base_url = (
-            base_url or os.getenv("TRADIER_BASE_URL") or "https://api.tradier.com/v1"
+            base_url or os.getenv("TRADIER_BASE_URL") or "https://sandbox.tradier.com/v1"
         )
 
         if configured_token is None or not configured_token.strip():
@@ -58,6 +58,19 @@ class TradierProvider(OptionChainProvider):
         self.base_url = configured_base_url.rstrip("/")
         self.timeout = timeout
         self.transport = transport
+
+    @property
+    def environment(self) -> str:
+        """Identify whether this provider uses sandbox or production."""
+        host = httpx.URL(self.base_url).host
+
+        if host == "sandbox.tradier.com":
+            return "sandbox"
+
+        if host == "api.tradier.com":
+            return "production"
+
+        return "custom"
 
     def _request_json(
         self,

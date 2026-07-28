@@ -56,6 +56,17 @@ def add_analysis_arguments(
     )
 
 
+def add_provider_safety_argument(
+    parser: argparse.ArgumentParser,
+) -> None:
+    """Add the explicit production-access confirmation flag."""
+    parser.add_argument(
+        "--allow-production",
+        action="store_true",
+        help=("explicitly allow requests to Tradier's production endpoint"),
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Create the ArbLens command-line parser."""
     parser = argparse.ArgumentParser(
@@ -79,6 +90,16 @@ def build_parser() -> argparse.ArgumentParser:
         analyze_parser,
         spot_default=100.0,
     )
+
+    expirations_parser = subparsers.add_parser(
+        "expirations",
+        help="list available Tradier option expirations",
+    )
+    expirations_parser.add_argument(
+        "symbol",
+        help="underlying symbol, such as SPY",
+    )
+    add_provider_safety_argument(expirations_parser)
 
     fetch_parser = subparsers.add_parser(
         "fetch",
@@ -104,6 +125,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="parquet",
         help="snapshot file format",
     )
+    add_provider_safety_argument(fetch_parser)
     add_analysis_arguments(
         fetch_parser,
         spot_default=None,
@@ -120,6 +142,7 @@ def normalize_arguments(
 
     commands = {
         "analyze",
+        "expirations",
         "fetch",
         "-h",
         "--help",
@@ -129,6 +152,23 @@ def normalize_arguments(
         arguments.insert(0, "analyze")
 
     return arguments
+
+
+def validate_provider_environment(
+    provider: OptionChainProvider,
+    *,
+    allow_production: bool,
+) -> None:
+    """Block accidental production requests."""
+    environment = provider.environment
+
+    if environment == "production" and not allow_production:
+        raise ValueError(
+            "Tradier production access is blocked by default; "
+            "rerun with --allow-production to continue"
+        )
+
+    print(f"Provider environment: {environment}")
 
 
 def print_analysis(
@@ -188,12 +228,53 @@ def run_analyze(args: argparse.Namespace) -> None:
     )
 
 
+def run_expirations(
+    args: argparse.Namespace,
+    provider_factory: ProviderFactory,
+) -> None:
+    """List available option expirations for one symbol."""
+    provider = provider_factory()
+
+    validate_provider_environment(
+        provider,
+        allow_production=args.allow_production,
+    )
+
+    expirations = provider.get_expirations(args.symbol)
+    normalized_symbol = args.symbol.strip().upper()
+
+    print(f"Symbol: {normalized_symbol}")
+    print(f"Available expirations: {len(expirations)}")
+
+    if not expirations:
+        print()
+        print("No expirations returned.")
+        return
+
+    print()
+
+    for expiration in expirations:
+        print(expiration)
+
+
 def run_fetch(
     args: argparse.Namespace,
     provider_factory: ProviderFactory,
 ) -> None:
     """Fetch, save, and optionally analyze a Tradier chain."""
     provider = provider_factory()
+
+    validate_provider_environment(
+        provider,
+        allow_production=args.allow_production,
+    )
+
+    available_expirations = provider.get_expirations(args.symbol)
+
+    if args.expiration not in available_expirations:
+        normalized_symbol = args.symbol.strip().upper()
+
+        raise ValueError(f"expiration {args.expiration} is not available for {normalized_symbol}")
 
     raw = provider.get_chain(
         args.symbol,
@@ -240,8 +321,16 @@ def main(
     try:
         if args.command == "analyze":
             run_analyze(args)
+        elif args.command == "expirations":
+            run_expirations(
+                args,
+                provider_factory,
+            )
         elif args.command == "fetch":
-            run_fetch(args, provider_factory)
+            run_fetch(
+                args,
+                provider_factory,
+            )
     except (
         FileNotFoundError,
         TradierAPIError,

@@ -164,3 +164,25 @@ def test_http_error_raises_tradier_error() -> None:
         match="status 401",
     ):
         provider.get_expirations("SPY")
+
+
+def test_default_environment_is_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "arblens.providers.tradier.load_dotenv",
+        lambda: False,
+    )
+    monkeypatch.setenv(
+        "TRADIER_ACCESS_TOKEN",
+        "test-token",
+    )
+    monkeypatch.delenv(
+        "TRADIER_BASE_URL",
+        raising=False,
+    )
+
+    provider = TradierProvider()
+
+    assert provider.base_url == ("https://sandbox.tradier.com/v1")
+    assert provider.environment == "sandbox"
