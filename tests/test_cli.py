@@ -26,3 +26,8 @@ def test_cli_reports_average_bid_ask_spread() -> None:
     assert "Quote warnings: 1" in result.stdout
     assert "Midpoint violations: 3" in result.stdout
     assert "Executable violations: 0" in result.stdout
+    assert "Opportunities after costs: 0" in result.stdout
+    assert "Removed by bid-ask spread: 3" in result.stdout
+    assert "Removed by transaction costs: 0" in result.stdout
+    assert "Opportunity assessment:" in result.stdout
+    assert "removed_by_spread" in result.stdout

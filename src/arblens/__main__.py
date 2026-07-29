@@ -11,6 +11,10 @@ from arblens.detection import (
     run_all_checks,
     violations_to_frame,
 )
+from arblens.execution import (
+    assess_opportunities,
+    assessments_to_frame,
+)
 from arblens.io import (
     load_chain,
     save_timestamped_snapshot,
@@ -56,6 +60,36 @@ def add_analysis_arguments(
     )
 
 
+def add_execution_arguments(
+    parser: argparse.ArgumentParser,
+) -> None:
+    """Add assumptions used for executable-edge analysis."""
+    parser.add_argument(
+        "--contract-multiplier",
+        type=int,
+        default=100,
+        help=("underlying units represented by one option contract"),
+    )
+    parser.add_argument(
+        "--commission-per-contract",
+        type=float,
+        default=0.65,
+        help=("estimated commission charged for each option contract"),
+    )
+    parser.add_argument(
+        "--fee-per-contract",
+        type=float,
+        default=0.05,
+        help=("additional estimated fees for each option contract"),
+    )
+    parser.add_argument(
+        "--minimum-net-edge",
+        type=float,
+        default=0.0,
+        help=("required net edge per strategy after estimated costs"),
+    )
+
+
 def add_provider_safety_argument(
     parser: argparse.ArgumentParser,
 ) -> None:
@@ -90,6 +124,7 @@ def build_parser() -> argparse.ArgumentParser:
         analyze_parser,
         spot_default=100.0,
     )
+    add_execution_arguments(analyze_parser)
 
     expirations_parser = subparsers.add_parser(
         "expirations",
@@ -130,6 +165,7 @@ def build_parser() -> argparse.ArgumentParser:
         fetch_parser,
         spot_default=None,
     )
+    add_execution_arguments(fetch_parser)
 
     return parser
 
@@ -164,8 +200,9 @@ def validate_provider_environment(
 
     if environment == "production" and not allow_production:
         raise ValueError(
-            "Tradier production access is blocked by default; "
-            "rerun with --allow-production to continue"
+            "Tradier production access is blocked by "
+            "default; rerun with --allow-production "
+            "to continue"
         )
 
     print(f"Provider environment: {environment}")
@@ -178,6 +215,10 @@ def print_analysis(
     time: float,
     rate: float,
     dividend_yield: float,
+    contract_multiplier: int,
+    commission_per_contract: float,
+    fee_per_contract: float,
+    minimum_net_edge: float,
 ) -> None:
     """Clean, analyze, and print one option-chain summary."""
     cleaned, issues = clean_quotes(raw)
@@ -197,9 +238,25 @@ def print_analysis(
         rate=rate,
         dividend_yield=dividend_yield,
     )
+
     midpoint_violation_count = sum(violation.price_basis == "midpoint" for violation in violations)
 
     executable_violation_count = sum(violation.price_basis == "bid_ask" for violation in violations)
+
+    assessments = assess_opportunities(
+        violations,
+        contract_multiplier=contract_multiplier,
+        commission_per_contract=(commission_per_contract),
+        fee_per_contract=fee_per_contract,
+        minimum_net_edge=minimum_net_edge,
+    )
+
+    opportunities_after_costs = sum(assessment.profitable_after_costs for assessment in assessments)
+
+    removed_by_spread = sum(assessment.status == "removed_by_spread" for assessment in assessments)
+
+    removed_by_costs = sum(assessment.status == "removed_by_costs" for assessment in assessments)
+
     print(f"Raw rows: {len(raw)}")
     print(f"Clean rows: {len(cleaned)}")
     print(f"Quote issues: {len(issues)}")
@@ -209,17 +266,32 @@ def print_analysis(
     print(f"Violations: {len(violations)}")
     print(f"Midpoint violations: {midpoint_violation_count}")
     print(f"Executable violations: {executable_violation_count}")
+    print(f"Opportunities after costs: {opportunities_after_costs}")
+    print(f"Removed by bid-ask spread: {removed_by_spread}")
+    print(f"Removed by transaction costs: {removed_by_costs}")
     print()
 
-    table = violations_to_frame(violations)
+    violation_table = violations_to_frame(violations)
 
-    if table.empty:
+    if violation_table.empty:
         print("No violations detected.")
     else:
-        print(table.to_string(index=False))
+        print(violation_table.to_string(index=False))
+
+    print()
+    print("Opportunity assessment:")
+
+    assessment_table = assessments_to_frame(assessments)
+
+    if assessment_table.empty:
+        print("No opportunities to assess.")
+    else:
+        print(assessment_table.to_string(index=False))
 
 
-def run_analyze(args: argparse.Namespace) -> None:
+def run_analyze(
+    args: argparse.Namespace,
+) -> None:
     """Analyze an existing local option-chain file."""
     raw = load_chain(args.path)
 
@@ -229,6 +301,10 @@ def run_analyze(args: argparse.Namespace) -> None:
         time=args.time,
         rate=args.rate,
         dividend_yield=args.dividend_yield,
+        contract_multiplier=(args.contract_multiplier),
+        commission_per_contract=(args.commission_per_contract),
+        fee_per_contract=(args.fee_per_contract),
+        minimum_net_edge=(args.minimum_net_edge),
     )
 
 
@@ -241,10 +317,11 @@ def run_expirations(
 
     validate_provider_environment(
         provider,
-        allow_production=args.allow_production,
+        allow_production=(args.allow_production),
     )
 
     expirations = provider.get_expirations(args.symbol)
+
     normalized_symbol = args.symbol.strip().upper()
 
     print(f"Symbol: {normalized_symbol}")
@@ -270,7 +347,7 @@ def run_fetch(
 
     validate_provider_environment(
         provider,
-        allow_production=args.allow_production,
+        allow_production=(args.allow_production),
     )
 
     available_expirations = provider.get_expirations(args.symbol)
@@ -309,7 +386,11 @@ def run_fetch(
             spot=args.spot,
             time=args.time,
             rate=args.rate,
-            dividend_yield=args.dividend_yield,
+            dividend_yield=(args.dividend_yield),
+            contract_multiplier=(args.contract_multiplier),
+            commission_per_contract=(args.commission_per_contract),
+            fee_per_contract=(args.fee_per_contract),
+            minimum_net_edge=(args.minimum_net_edge),
         )
 
 
@@ -320,21 +401,25 @@ def main(
 ) -> int:
     """Run the ArbLens command-line application."""
     parser = build_parser()
+
     args = parser.parse_args(normalize_arguments(argv))
 
     try:
         if args.command == "analyze":
             run_analyze(args)
+
         elif args.command == "expirations":
             run_expirations(
                 args,
                 provider_factory,
             )
+
         elif args.command == "fetch":
             run_fetch(
                 args,
                 provider_factory,
             )
+
     except (
         FileNotFoundError,
         TradierAPIError,
