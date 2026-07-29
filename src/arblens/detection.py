@@ -59,6 +59,59 @@ def detect_price_bound_violations(
     return violations
 
 
+def detect_executable_price_bound_violations(
+    frame: pd.DataFrame,
+    *,
+    spot: float,
+    time: float,
+    rate: float,
+    dividend_yield: float = 0.0,
+    tolerance: float = 1e-8,
+) -> list[Violation]:
+    """Detect price-bound violations using tradable bid and ask prices."""
+    violations: list[Violation] = []
+
+    for row in frame.itertuples():
+        lower, upper = european_price_bounds(
+            spot=spot,
+            strike=float(row.strike),
+            time=time,
+            rate=rate,
+            option_type=row.option_type,
+            dividend_yield=dividend_yield,
+        )
+
+        ask = float(row.ask)
+        bid = float(row.bid)
+
+        if ask < lower - tolerance:
+            violations.append(
+                Violation(
+                    "price_bound",
+                    row.option_type,
+                    str(row.expiration),
+                    (float(row.strike),),
+                    lower - ask,
+                    "bid_ask",
+                    (f"option ask {ask:.4f} is below lower bound {lower:.4f}"),
+                )
+            )
+        elif bid > upper + tolerance:
+            violations.append(
+                Violation(
+                    "price_bound",
+                    row.option_type,
+                    str(row.expiration),
+                    (float(row.strike),),
+                    bid - upper,
+                    "bid_ask",
+                    (f"option bid {bid:.4f} is above upper bound {upper:.4f}"),
+                )
+            )
+
+    return violations
+
+
 def detect_monotonicity_violations(
     frame: pd.DataFrame,
     *,
@@ -288,6 +341,13 @@ def run_all_checks(
 ) -> list[Violation]:
     return [
         *detect_price_bound_violations(
+            frame,
+            spot=spot,
+            time=time,
+            rate=rate,
+            dividend_yield=dividend_yield,
+        ),
+        *detect_executable_price_bound_violations(
             frame,
             spot=spot,
             time=time,
