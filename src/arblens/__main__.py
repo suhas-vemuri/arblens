@@ -197,7 +197,9 @@ def print_analysis(
         rate=rate,
         dividend_yield=dividend_yield,
     )
+    midpoint_violation_count = sum(violation.price_basis == "midpoint" for violation in violations)
 
+    executable_violation_count = sum(violation.price_basis == "bid_ask" for violation in violations)
     print(f"Raw rows: {len(raw)}")
     print(f"Clean rows: {len(cleaned)}")
     print(f"Quote issues: {len(issues)}")
@@ -205,6 +207,8 @@ def print_analysis(
     print(f"Quote warnings: {warning_count}")
     print(f"Average bid-ask spread: {average_spread:.4f}")
     print(f"Violations: {len(violations)}")
+    print(f"Midpoint violations: {midpoint_violation_count}")
+    print(f"Executable violations: {executable_violation_count}")
     print()
 
     table = violations_to_frame(violations)
