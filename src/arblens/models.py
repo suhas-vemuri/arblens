@@ -28,3 +28,24 @@ class Violation:
     price_basis: str
     details: str
     detected_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class OpportunityAssessment:
+    """Explain whether a midpoint anomaly survives realistic filters."""
+
+    violation_type: str
+    option_type: str
+    expiration: str
+    strikes: tuple[float, ...]
+    midpoint_magnitude: float
+    executable_magnitude: float
+    survives_bid_ask: bool
+    option_contracts: int
+    contract_multiplier: int
+    gross_edge_per_contract: float
+    estimated_transaction_cost: float
+    net_edge_per_contract: float
+    profitable_after_costs: bool
+    status: str
+    details: str
