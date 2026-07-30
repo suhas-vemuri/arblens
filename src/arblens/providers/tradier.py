@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 import pandas as pd
 from dotenv import load_dotenv
 
+from arblens.market import UnderlyingQuote
 from arblens.providers.base import OptionChainProvider
+
 
 CHAIN_COLUMNS = [
     "symbol",
@@ -23,6 +26,12 @@ CHAIN_COLUMNS = [
     "volume",
     "open_interest",
     "quote_timestamp",
+    "implied_volatility",
+    "delta",
+    "gamma",
+    "theta",
+    "vega",
+    "rho",
 ]
 
 
@@ -31,7 +40,7 @@ class TradierAPIError(RuntimeError):
 
 
 class TradierProvider(OptionChainProvider):
-    """Retrieve and normalize Tradier option-market data."""
+    """Retrieve and normalize Tradier market data."""
 
     def __init__(
         self,
@@ -43,13 +52,23 @@ class TradierProvider(OptionChainProvider):
     ) -> None:
         load_dotenv()
 
-        configured_token = token or os.getenv("TRADIER_ACCESS_TOKEN")
+        configured_token = (
+            token
+            or os.getenv("TRADIER_TOKEN")
+            or os.getenv("TRADIER_ACCESS_TOKEN")
+        )
+
         configured_base_url = (
-            base_url or os.getenv("TRADIER_BASE_URL") or "https://sandbox.tradier.com/v1"
+            base_url
+            or os.getenv("TRADIER_BASE_URL")
+            or "https://sandbox.tradier.com/v1"
         )
 
         if configured_token is None or not configured_token.strip():
-            raise ValueError("TRADIER_ACCESS_TOKEN is not configured")
+            raise ValueError(
+                "Tradier token is not configured. "
+                "Add TRADIER_TOKEN to your .env file."
+            )
 
         if timeout <= 0:
             raise ValueError("timeout must be greater than zero")
@@ -62,6 +81,7 @@ class TradierProvider(OptionChainProvider):
     @property
     def environment(self) -> str:
         """Identify whether this provider uses sandbox or production."""
+
         host = httpx.URL(self.base_url).host
 
         if host == "sandbox.tradier.com":
@@ -77,7 +97,8 @@ class TradierProvider(OptionChainProvider):
         path: str,
         params: dict[str, str],
     ) -> dict[str, Any]:
-        """Send one authenticated GET request and return its JSON object."""
+        """Send one authenticated GET request and return JSON."""
+
         url = f"{self.base_url}{path}"
 
         headers = {
@@ -95,28 +116,52 @@ class TradierProvider(OptionChainProvider):
                     headers=headers,
                     params=params,
                 )
+
         except httpx.RequestError as exc:
-            raise TradierAPIError(f"Could not connect to Tradier: {exc}") from exc
+            raise TradierAPIError(
+                f"Could not connect to Tradier: {exc}"
+            ) from exc
+
+        if response.status_code == 401:
+            raise TradierAPIError(
+                "Tradier authentication failed with status 401. "
+                "Check the API token and endpoint."
+            )
+
+        if response.status_code == 429:
+            raise TradierAPIError(
+                "Tradier rate limit reached with status 429."
+            )
 
         if response.is_error:
             detail = response.text.strip() or "no response body"
 
             raise TradierAPIError(
-                f"Tradier request failed with status {response.status_code}: {detail}"
+                f"Tradier request failed with status "
+                f"{response.status_code}: {detail}"
             )
 
         try:
             payload = response.json()
+
         except ValueError as exc:
-            raise TradierAPIError("Tradier returned invalid JSON") from exc
+            raise TradierAPIError(
+                "Tradier returned invalid JSON"
+            ) from exc
 
         if not isinstance(payload, dict):
-            raise TradierAPIError("Tradier returned JSON in an unexpected format")
+            raise TradierAPIError(
+                "Tradier returned JSON in an unexpected format"
+            )
 
         return payload
 
     @staticmethod
-    def _normalize_symbol(symbol: str) -> str:
+    def _normalize_symbol(
+        symbol: str,
+    ) -> str:
+        """Standardize a stock or ETF symbol."""
+
         normalized_symbol = symbol.strip().upper()
 
         if not normalized_symbol:
@@ -124,14 +169,165 @@ class TradierProvider(OptionChainProvider):
 
         return normalized_symbol
 
-    def get_expirations(self, symbol: str) -> list[str]:
-        """Return available option-expiration dates for a symbol."""
+    @staticmethod
+    def _parse_timestamp(
+        value: object,
+    ) -> datetime | None:
+        """Normalize a Tradier timestamp into UTC."""
+
+        if value is None:
+            return None
+
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                return value.replace(tzinfo=UTC)
+
+            return value.astimezone(UTC)
+
+        if isinstance(value, str):
+            stripped_value = value.strip()
+
+            if not stripped_value:
+                return None
+
+            try:
+                numeric_value = float(stripped_value)
+            except ValueError:
+                numeric_value = None
+
+            if numeric_value is not None:
+                return TradierProvider._parse_timestamp(
+                    numeric_value
+                )
+
+            parsed_value = pd.to_datetime(
+                stripped_value,
+                utc=True,
+                errors="coerce",
+            )
+
+            if pd.isna(parsed_value):
+                return None
+
+            return parsed_value.to_pydatetime()
+
+        if isinstance(value, (int, float)):
+            numeric_value = float(value)
+
+            # Tradier timestamps may be Unix milliseconds.
+            if abs(numeric_value) > 10_000_000_000:
+                numeric_value /= 1000.0
+
+            try:
+                return datetime.fromtimestamp(
+                    numeric_value,
+                    tz=UTC,
+                )
+            except (OverflowError, OSError, ValueError):
+                return None
+
+        return None
+
+    @staticmethod
+    def _extract_greek(
+        greeks: dict[str, Any],
+        name: str,
+    ) -> Any:
+        """Read one Greek safely from a Tradier response."""
+
+        value = greeks.get(name)
+
+        if value is None and name == "implied_volatility":
+            value = greeks.get("mid_iv")
+
+        return value
+
+    def get_underlying_quote(
+        self,
+        symbol: str,
+    ) -> UnderlyingQuote:
+        """Return one normalized stock or ETF quote."""
+
+        normalized_symbol = self._normalize_symbol(symbol)
+
+        payload = self._request_json(
+            "/markets/quotes",
+            {
+                "symbols": normalized_symbol,
+                "greeks": "false",
+            },
+        )
+
+        quotes_container = payload.get("quotes")
+
+        if not isinstance(quotes_container, dict):
+            raise TradierAPIError(
+                "Tradier did not return an underlying quote"
+            )
+
+        raw_quotes = quotes_container.get("quote")
+
+        if isinstance(raw_quotes, dict):
+            quote_items = [raw_quotes]
+
+        elif isinstance(raw_quotes, list):
+            quote_items = raw_quotes
+
+        else:
+            raise TradierAPIError(
+                "Tradier returned quotes in an unexpected format"
+            )
+
+        selected_quote: dict[str, Any] | None = None
+
+        for quote_item in quote_items:
+            if not isinstance(quote_item, dict):
+                continue
+
+            returned_symbol = str(
+                quote_item.get("symbol", "")
+            ).strip().upper()
+
+            if returned_symbol == normalized_symbol:
+                selected_quote = quote_item
+                break
+
+        if selected_quote is None:
+            raise TradierAPIError(
+                f"Tradier did not return a quote for "
+                f"{normalized_symbol}"
+            )
+
+        return UnderlyingQuote(
+            symbol=normalized_symbol,
+            bid=selected_quote.get("bid"),
+            ask=selected_quote.get("ask"),
+            last=selected_quote.get("last"),
+            bid_timestamp=self._parse_timestamp(
+                selected_quote.get("bid_date")
+            ),
+            ask_timestamp=self._parse_timestamp(
+                selected_quote.get("ask_date")
+            ),
+            trade_timestamp=self._parse_timestamp(
+                selected_quote.get("trade_date")
+            ),
+        )
+
+    def get_expirations(
+        self,
+        symbol: str,
+    ) -> list[str]:
+        """Return available option expirations."""
+
         normalized_symbol = self._normalize_symbol(symbol)
 
         payload = self._request_json(
             "/markets/options/expirations",
             {
                 "symbol": normalized_symbol,
+                "includeAllRoots": "true",
+                "strikes": "false",
             },
         )
 
@@ -146,16 +342,24 @@ class TradierProvider(OptionChainProvider):
             expiration_dates = [expiration_dates]
 
         if not isinstance(expiration_dates, list):
-            raise TradierAPIError("Tradier returned expirations in an unexpected format")
+            raise TradierAPIError(
+                "Tradier returned expirations in an "
+                "unexpected format"
+            )
 
-        return [str(expiration) for expiration in expiration_dates if expiration]
+        return [
+            str(expiration)
+            for expiration in expiration_dates
+            if expiration
+        ]
 
     def get_chain(
         self,
         symbol: str,
         expiration: str,
     ) -> pd.DataFrame:
-        """Return one normalized option chain as a DataFrame."""
+        """Return one normalized option chain."""
+
         normalized_symbol = self._normalize_symbol(symbol)
         normalized_expiration = expiration.strip()
 
@@ -182,7 +386,9 @@ class TradierProvider(OptionChainProvider):
             options = [options]
 
         if not isinstance(options, list):
-            raise TradierAPIError("Tradier returned options in an unexpected format")
+            raise TradierAPIError(
+                "Tradier returned options in an unexpected format"
+            )
 
         rows: list[dict[str, object]] = []
 
@@ -190,11 +396,28 @@ class TradierProvider(OptionChainProvider):
             if not isinstance(option, dict):
                 continue
 
+            raw_greeks = option.get("greeks")
+
+            greeks = (
+                raw_greeks
+                if isinstance(raw_greeks, dict)
+                else {}
+            )
+
+            quote_timestamp = (
+                option.get("ask_date")
+                or option.get("bid_date")
+                or option.get("trade_date")
+            )
+
             rows.append(
                 {
                     "symbol": normalized_symbol,
                     "contract_symbol": option.get("symbol"),
-                    "expiration": (option.get("expiration_date") or normalized_expiration),
+                    "expiration": (
+                        option.get("expiration_date")
+                        or normalized_expiration
+                    ),
                     "option_type": option.get("option_type"),
                     "strike": option.get("strike"),
                     "bid": option.get("bid"),
@@ -203,9 +426,40 @@ class TradierProvider(OptionChainProvider):
                     "ask_size": option.get("asksize"),
                     "last": option.get("last"),
                     "volume": option.get("volume"),
-                    "open_interest": option.get("open_interest"),
-                    "quote_timestamp": option.get("trade_date"),
+                    "open_interest": option.get(
+                        "open_interest"
+                    ),
+                    "quote_timestamp": quote_timestamp,
+                    "implied_volatility": (
+                        self._extract_greek(
+                            greeks,
+                            "implied_volatility",
+                        )
+                    ),
+                    "delta": self._extract_greek(
+                        greeks,
+                        "delta",
+                    ),
+                    "gamma": self._extract_greek(
+                        greeks,
+                        "gamma",
+                    ),
+                    "theta": self._extract_greek(
+                        greeks,
+                        "theta",
+                    ),
+                    "vega": self._extract_greek(
+                        greeks,
+                        "vega",
+                    ),
+                    "rho": self._extract_greek(
+                        greeks,
+                        "rho",
+                    ),
                 }
             )
 
-        return pd.DataFrame(rows, columns=CHAIN_COLUMNS)
+        return pd.DataFrame(
+            rows,
+            columns=CHAIN_COLUMNS,
+        )

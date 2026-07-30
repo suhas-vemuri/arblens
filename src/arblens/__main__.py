@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import UTC, datetime
 from collections.abc import Callable, Sequence
 
 import pandas as pd
@@ -19,6 +20,10 @@ from arblens.io import (
     load_chain,
     save_timestamped_snapshot,
 )
+from arblens.market import (
+    calculate_time_to_expiration,
+    select_underlying_spot,
+)
 from arblens.providers.base import OptionChainProvider
 from arblens.providers.tradier import (
     TradierAPIError,
@@ -32,6 +37,7 @@ def add_analysis_arguments(
     parser: argparse.ArgumentParser,
     *,
     spot_default: float | None,
+    time_default: float | None = 30 / 365,
 ) -> None:
     """Add pricing assumptions shared by analysis commands."""
     parser.add_argument(
@@ -43,8 +49,12 @@ def add_analysis_arguments(
     parser.add_argument(
         "--time",
         type=float,
-        default=30 / 365,
-        help="time to expiration in years",
+        default=time_default,
+        help=(
+            "time to expiration in years; "
+            "fetch calculates this automatically "
+            "when omitted"
+        ),
     )
     parser.add_argument(
         "--rate",
@@ -164,6 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_analysis_arguments(
         fetch_parser,
         spot_default=None,
+        time_default=None,
     )
     add_execution_arguments(fetch_parser)
 
@@ -211,8 +222,8 @@ def validate_provider_environment(
 def print_analysis(
     raw: pd.DataFrame,
     *,
-    spot: float,
-    time: float,
+    spot: float | None,
+    time: float | None,
     rate: float,
     dividend_yield: float,
     contract_multiplier: int,
@@ -337,63 +348,192 @@ def run_expirations(
     for expiration in expirations:
         print(expiration)
 
-
 def run_fetch(
     args: argparse.Namespace,
     provider_factory: ProviderFactory,
 ) -> None:
-    """Fetch, save, and optionally analyze a Tradier chain."""
+    """Fetch, save, and analyze a Tradier option chain."""
+
     provider = provider_factory()
 
     validate_provider_environment(
         provider,
-        allow_production=(args.allow_production),
+        allow_production=args.allow_production,
     )
 
-    available_expirations = provider.get_expirations(args.symbol)
+    normalized_symbol = args.symbol.strip().upper()
+
+    available_expirations = provider.get_expirations(
+        normalized_symbol
+    )
 
     if args.expiration not in available_expirations:
-        normalized_symbol = args.symbol.strip().upper()
+        raise ValueError(
+            f"expiration {args.expiration} is not available "
+            f"for {normalized_symbol}"
+        )
 
-        raise ValueError(f"expiration {args.expiration} is not available for {normalized_symbol}")
+    captured_at = datetime.now(UTC)
 
     raw = provider.get_chain(
-        args.symbol,
+        normalized_symbol,
         args.expiration,
     )
 
     print(f"Fetched contracts: {len(raw)}")
 
     if raw.empty:
-        print("No option contracts returned; snapshot was not saved.")
+        print(
+            "No option contracts returned; "
+            "snapshot was not saved."
+        )
         return
 
     destination = save_timestamped_snapshot(
         raw,
-        args.symbol,
+        normalized_symbol,
         args.expiration,
+        captured_at=captured_at,
         directory=args.output_dir,
         file_format=args.format,
     )
 
     print(f"Snapshot saved: {destination}")
 
-    if args.spot is not None:
-        print()
+    selected_spot: float | None = None
+    selected_time: float | None = None
 
-        print_analysis(
-            raw,
-            spot=args.spot,
-            time=args.time,
-            rate=args.rate,
-            dividend_yield=(args.dividend_yield),
-            contract_multiplier=(args.contract_multiplier),
-            commission_per_contract=(args.commission_per_contract),
-            fee_per_contract=(args.fee_per_contract),
-            minimum_net_edge=(args.minimum_net_edge),
+    spot_source = "unavailable"
+    spot_reason = "underlying quote was not evaluated"
+    spot_warnings: tuple[str, ...] = ()
+
+    if args.spot is not None:
+        selected_spot = args.spot
+        spot_source = "manual_override"
+        spot_reason = "spot was supplied with --spot"
+
+    else:
+        quote_method = getattr(
+            provider,
+            "get_underlying_quote",
+            None,
         )
 
+        if not callable(quote_method):
+            spot_reason = (
+                "provider does not support underlying quotes"
+            )
 
+        else:
+            try:
+                underlying_quote = quote_method(
+                    normalized_symbol
+                )
+
+                spot_selection = select_underlying_spot(
+                    underlying_quote,
+                    now=captured_at,
+                )
+
+                selected_spot = spot_selection.spot
+                spot_source = spot_selection.source
+                spot_reason = spot_selection.reason
+                spot_warnings = spot_selection.warnings
+
+            except (
+                NotImplementedError,
+                TradierAPIError,
+                ValueError,
+            ) as exc:
+                spot_reason = str(exc)
+
+    if args.time is not None:
+        selected_time = args.time
+        time_source = "manual_override"
+        time_reason = "time was supplied with --time"
+
+    else:
+        try:
+            expiration_result = calculate_time_to_expiration(
+                args.expiration,
+                now=captured_at,
+            )
+
+            selected_time = expiration_result.years_remaining
+            time_source = "automatic"
+            time_reason = (
+                f"{expiration_result.days_remaining:.4f} "
+                "calendar days remaining"
+            )
+
+        except ValueError as exc:
+            time_source = "unavailable"
+            time_reason = str(exc)
+
+    print()
+    print("Analysis assumptions:")
+    print(f"Symbol: {normalized_symbol}")
+    print(f"Expiration: {args.expiration}")
+    print(
+        f"Snapshot time: "
+        f"{captured_at.isoformat()}"
+    )
+
+    if selected_spot is None:
+        print("Underlying price: unavailable")
+    else:
+        print(
+            f"Underlying price: "
+            f"{selected_spot:.6f}"
+        )
+
+    print(f"Underlying price source: {spot_source}")
+    print(f"Underlying price reason: {spot_reason}")
+
+    for warning in spot_warnings:
+        print(f"Underlying warning: {warning}")
+
+    if selected_time is None:
+        print("Time to expiration: unavailable")
+    else:
+        print(
+            f"Time to expiration: "
+            f"{selected_time:.10f} years"
+        )
+
+    print(f"Time source: {time_source}")
+    print(f"Time reason: {time_reason}")
+    print(f"Risk-free rate: {args.rate:.4%}")
+    print(
+        f"Dividend yield: "
+        f"{args.dividend_yield:.4%}"
+    )
+
+    if selected_spot is None or selected_time is None:
+        print()
+        print(
+            "Spot-dependent checks will be skipped."
+        )
+        print(
+            "Monotonicity and butterfly checks "
+            "will still run."
+        )
+
+    print()
+
+    print_analysis(
+        raw,
+        spot=selected_spot,
+        time=selected_time,
+        rate=args.rate,
+        dividend_yield=args.dividend_yield,
+        contract_multiplier=args.contract_multiplier,
+        commission_per_contract=(
+            args.commission_per_contract
+        ),
+        fee_per_contract=args.fee_per_contract,
+        minimum_net_edge=args.minimum_net_edge,
+    )
 def main(
     argv: Sequence[str] | None = None,
     *,
