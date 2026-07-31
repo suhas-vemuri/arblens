@@ -38,11 +38,7 @@ def build_chain() -> pd.DataFrame:
 def test_chain_only_checks_run_without_spot_or_time() -> None:
     cleaned, issues = clean_quotes(build_chain())
 
-    assert not [
-        issue
-        for issue in issues
-        if issue.severity == "error"
-    ]
+    assert not [issue for issue in issues if issue.severity == "error"]
 
     violations = run_all_checks(
         cleaned,
@@ -51,10 +47,7 @@ def test_chain_only_checks_run_without_spot_or_time() -> None:
         rate=0.04,
     )
 
-    violation_types = {
-        violation.violation_type
-        for violation in violations
-    }
+    violation_types = {violation.violation_type for violation in violations}
 
     assert "strike_monotonicity" in violation_types
     assert "butterfly_convexity" in violation_types
@@ -109,10 +102,7 @@ def test_spot_dependent_checks_run_with_market_inputs() -> None:
         rate=0.04,
     )
 
-    violation_types = {
-        violation.violation_type
-        for violation in violations
-    }
+    violation_types = {violation.violation_type for violation in violations}
 
     assert "strike_monotonicity" in violation_types
     assert "butterfly_convexity" in violation_types

@@ -9,7 +9,6 @@ from arblens.market import (
     select_underlying_spot,
 )
 
-
 NOW = datetime(
     2026,
     7,
@@ -170,13 +169,10 @@ def test_calculates_time_to_expiration() -> None:
         now=NOW,
     )
 
-    assert result.seconds_remaining == pytest.approx(
-        24 * 60 * 60
-    )
+    assert result.seconds_remaining == pytest.approx(24 * 60 * 60)
     assert result.days_remaining == pytest.approx(1.0)
-    assert result.years_remaining == pytest.approx(
-        1 / 365
-    )
+    assert result.years_remaining == pytest.approx(1 / 365)
+
 
 def test_ignores_stale_last_trade_when_bid_ask_is_current() -> None:
     stale_trade_time = datetime(
@@ -209,6 +205,8 @@ def test_ignores_stale_last_trade_when_bid_ask_is_current() -> None:
     assert selection.source == "bid_ask_midpoint"
     assert len(selection.warnings) == 1
     assert "ignored" in selection.warnings[0]
+
+
 def test_rejects_expired_date() -> None:
     with pytest.raises(
         ValueError,

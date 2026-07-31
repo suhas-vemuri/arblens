@@ -330,6 +330,7 @@ def detect_put_call_parity_violations(
 
     return violations
 
+
 def run_all_checks(
     frame: pd.DataFrame,
     *,
@@ -380,6 +381,8 @@ def run_all_checks(
             dividend_yield=dividend_yield,
         ),
     ]
+
+
 def violations_to_frame(violations: list[Violation]) -> pd.DataFrame:
     if not violations:
         return pd.DataFrame(

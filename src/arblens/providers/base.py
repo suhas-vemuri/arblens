@@ -24,9 +24,7 @@ class OptionChainProvider(ABC):
         Providers that do not support underlying quotes may leave
         this method unimplemented.
         """
-        raise NotImplementedError(
-            "provider does not support underlying quotes"
-        )
+        raise NotImplementedError("provider does not support underlying quotes")
 
     @abstractmethod
     def get_expirations(

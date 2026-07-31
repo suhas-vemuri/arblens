@@ -26,12 +26,12 @@ def test_missing_token_raises(
         lambda: False,
     )
     monkeypatch.delenv(
-    	"TRADIER_TOKEN",
-    	raising=False,
+        "TRADIER_TOKEN",
+        raising=False,
     )
     monkeypatch.delenv(
-    	"TRADIER_ACCESS_TOKEN",
-    	raising=False,
+        "TRADIER_ACCESS_TOKEN",
+        raising=False,
     )
     with pytest.raises(
         ValueError,

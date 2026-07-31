@@ -29,9 +29,7 @@ def test_get_underlying_quote_normalizes_values() -> None:
         assert request.url.path == "/v1/markets/quotes"
         assert request.url.params["symbols"] == "AAPL"
         assert request.url.params["greeks"] == "false"
-        assert request.headers["Authorization"] == (
-            "Bearer test-token"
-        )
+        assert request.headers["Authorization"] == ("Bearer test-token")
 
         return httpx.Response(
             200,

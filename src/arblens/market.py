@@ -5,15 +5,15 @@ from datetime import UTC, date, datetime, time
 from math import isfinite
 from zoneinfo import ZoneInfo
 
+import pandas as pd
 
+NEW_YORK = ZoneInfo("America/New_York")
 SECONDS_PER_YEAR = 365.0 * 24.0 * 60.0 * 60.0
-DEFAULT_EXPIRATION_TIME = time(hour=16, minute=0)
-NEW_YORK_TIME = ZoneInfo("America/New_York")
 
 
 @dataclass(frozen=True, slots=True)
 class UnderlyingQuote:
-    """Normalized stock or ETF quote used by ArbLens."""
+    """One stock or ETF quote used as the underlying price."""
 
     symbol: str
     bid: float | None
@@ -26,18 +26,18 @@ class UnderlyingQuote:
 
 @dataclass(frozen=True, slots=True)
 class SpotSelection:
-    """Explain which underlying price ArbLens selected."""
+    """Result of deciding whether an underlying price is safe."""
 
     usable: bool
     spot: float | None
     source: str
-    warnings: tuple[str, ...]
     reason: str
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class ExpirationCalculation:
-    """Time remaining until the option expiration timestamp."""
+    """Calculated time remaining before an option expires."""
 
     expiration_timestamp: datetime
     seconds_remaining: float
@@ -45,10 +45,36 @@ class ExpirationCalculation:
     years_remaining: float
 
 
-def _finite_positive_number(
+@dataclass(frozen=True, slots=True)
+class ChainTimestampSummary:
+    """Summary of timestamps found throughout an option chain."""
+
+    usable: bool
+    representative_timestamp: datetime | None
+    newest_timestamp: datetime | None
+    oldest_timestamp: datetime | None
+    valid_count: int
+    missing_count: int
+    reason: str
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class MarketSynchronization:
+    """Result of comparing stock and option quote times."""
+
+    synchronized: bool
+    time_difference_seconds: float | None
+    underlying_timestamp: datetime | None
+    chain_timestamp: datetime | None
+    reason: str
+    warnings: tuple[str, ...] = ()
+
+
+def _positive_finite(
     value: object,
 ) -> float | None:
-    """Return a positive finite float or None."""
+    """Return a valid positive number or None."""
 
     try:
         number = float(value)
@@ -61,10 +87,10 @@ def _finite_positive_number(
     return number
 
 
-def _normalize_timestamp(
+def _as_utc(
     value: datetime | None,
 ) -> datetime | None:
-    """Convert a timestamp to timezone-aware UTC."""
+    """Convert a datetime to timezone-aware UTC."""
 
     if value is None:
         return None
@@ -75,19 +101,19 @@ def _normalize_timestamp(
     return value.astimezone(UTC)
 
 
-def _timestamp_age_seconds(
+def _age_seconds(
     timestamp: datetime | None,
     *,
     now: datetime,
 ) -> float | None:
-    """Return the age of a timestamp in seconds."""
+    """Measure how old a timestamp is in seconds."""
 
-    normalized = _normalize_timestamp(timestamp)
+    normalized_timestamp = _as_utc(timestamp)
 
-    if normalized is None:
+    if normalized_timestamp is None:
         return None
 
-    return (now - normalized).total_seconds()
+    return (now - normalized_timestamp).total_seconds()
 
 
 def select_underlying_spot(
@@ -99,45 +125,13 @@ def select_underlying_spot(
     max_relative_spread: float = 0.02,
     max_last_midpoint_difference: float = 0.03,
 ) -> SpotSelection:
-    """Choose a safe underlying price from a market quote.
+    """Choose a safe underlying price from a market quote."""
 
-    Selection order:
+    current_time = _as_utc(now) or datetime.now(UTC)
 
-    1. Use a current, reasonable bid-ask midpoint.
-    2. Use a current last trade when bid and ask are unavailable.
-    3. Reject internally inconsistent or stale market data.
-    """
-
-    if max_quote_age_seconds < 0:
-        raise ValueError(
-            "max_quote_age_seconds must be non-negative"
-        )
-
-    if max_trade_age_seconds < 0:
-        raise ValueError(
-            "max_trade_age_seconds must be non-negative"
-        )
-
-    if max_relative_spread < 0:
-        raise ValueError(
-            "max_relative_spread must be non-negative"
-        )
-
-    if max_last_midpoint_difference < 0:
-        raise ValueError(
-            "max_last_midpoint_difference must be non-negative"
-        )
-
-    current_time = now or datetime.now(UTC)
-
-    if current_time.tzinfo is None:
-        current_time = current_time.replace(tzinfo=UTC)
-    else:
-        current_time = current_time.astimezone(UTC)
-
-    bid = _finite_positive_number(quote.bid)
-    ask = _finite_positive_number(quote.ask)
-    last = _finite_positive_number(quote.last)
+    bid = _positive_finite(quote.bid)
+    ask = _positive_finite(quote.ask)
+    last = _positive_finite(quote.last)
 
     warnings: list[str] = []
 
@@ -147,14 +141,11 @@ def select_underlying_spot(
                 usable=False,
                 spot=None,
                 source="none",
-                warnings=(),
-                reason=(
-                    "underlying quote is crossed because bid "
-                    "is greater than ask"
-                ),
+                reason=("underlying market is crossed because the bid is above the ask"),
             )
 
         midpoint = (bid + ask) / 2.0
+
         relative_spread = (ask - bid) / midpoint
 
         if relative_spread > max_relative_spread:
@@ -162,7 +153,6 @@ def select_underlying_spot(
                 usable=False,
                 spot=None,
                 source="none",
-                warnings=(),
                 reason=(
                     f"underlying relative spread is "
                     f"{relative_spread:.2%}, above the "
@@ -170,59 +160,56 @@ def select_underlying_spot(
                 ),
             )
 
-        bid_age = _timestamp_age_seconds(
+        bid_age = _age_seconds(
             quote.bid_timestamp,
             now=current_time,
         )
-        ask_age = _timestamp_age_seconds(
+
+        ask_age = _age_seconds(
             quote.ask_timestamp,
             now=current_time,
         )
 
-        quote_ages = [
-            age
-            for age in (bid_age, ask_age)
-            if age is not None
-        ]
-
-        if quote_ages and max(quote_ages) > max_quote_age_seconds:
+        if bid_age is None or ask_age is None:
             return SpotSelection(
                 usable=False,
                 spot=None,
                 source="none",
-                warnings=(),
-                reason=(
-                    "underlying bid-ask quote is stale; "
-                    f"oldest side is {max(quote_ages):.1f} "
-                    "seconds old"
-                ),
+                reason=("underlying bid or ask timestamp is unavailable"),
             )
 
-        if not quote_ages:
-            warnings.append(
-                "underlying bid and ask timestamps were unavailable"
+        if bid_age > max_quote_age_seconds or ask_age > max_quote_age_seconds:
+            return SpotSelection(
+                usable=False,
+                spot=None,
+                source="none",
+                reason="underlying bid or ask is stale",
+            )
+
+        if bid_age < -5 or ask_age < -5:
+            return SpotSelection(
+                usable=False,
+                spot=None,
+                source="none",
+                reason=("underlying quote timestamp is in the future"),
             )
 
         if last is not None:
-            trade_age = _timestamp_age_seconds(
+            trade_age = _age_seconds(
                 quote.trade_timestamp,
                 now=current_time,
             )
 
-            if (
-                trade_age is not None
-                and trade_age > max_trade_age_seconds
-            ):
+            if trade_age is not None and trade_age > max_trade_age_seconds:
                 warnings.append(
                     f"last trade is {trade_age:.1f} seconds old; "
-                    "it was ignored and the bid-ask midpoint was used"
+                    "it was ignored and the bid-ask midpoint "
+                    "was used"
                 )
 
             else:
                 if trade_age is None:
-                    warnings.append(
-                        "last-trade timestamp was unavailable"
-                    )
+                    warnings.append("last-trade timestamp was unavailable")
 
                 last_difference = abs(last - midpoint) / midpoint
 
@@ -231,127 +218,296 @@ def select_underlying_spot(
                         usable=False,
                         spot=None,
                         source="none",
-                        warnings=tuple(warnings),
                         reason=(
-                            f"current last trade differs from the "
-                            f"bid-ask midpoint by "
+                            "current last trade differs from "
+                            "the bid-ask midpoint by "
                             f"{last_difference:.2%}, above the "
-                            f"{max_last_midpoint_difference:.2%} limit"
+                            f"{max_last_midpoint_difference:.2%} "
+                            "limit"
                         ),
+                        warnings=tuple(warnings),
                     )
+
         return SpotSelection(
             usable=True,
             spot=midpoint,
             source="bid_ask_midpoint",
+            reason=("current bid and ask formed a valid market midpoint"),
             warnings=tuple(warnings),
-            reason=(
-                "current bid and ask formed a valid market midpoint"
-            ),
         )
 
-    if last is not None:
-        trade_age = _timestamp_age_seconds(
-            quote.trade_timestamp,
-            now=current_time,
-        )
-
-        if (
-            trade_age is not None
-            and trade_age > max_trade_age_seconds
-        ):
-            return SpotSelection(
-                usable=False,
-                spot=None,
-                source="none",
-                warnings=(),
-                reason=(
-                    f"last trade is stale at "
-                    f"{trade_age:.1f} seconds old"
-                ),
-            )
-
-        if trade_age is None:
-            warnings.append(
-                "last-trade timestamp was unavailable"
-            )
-
+    if last is None:
         return SpotSelection(
-            usable=True,
-            spot=last,
-            source="last_trade",
-            warnings=tuple(warnings),
-            reason=(
-                "valid last trade was used because a complete "
-                "bid-ask quote was unavailable"
-            ),
+            usable=False,
+            spot=None,
+            source="none",
+            reason=("no usable underlying bid-ask market or last trade was available"),
         )
+
+    trade_age = _age_seconds(
+        quote.trade_timestamp,
+        now=current_time,
+    )
+
+    if trade_age is None:
+        return SpotSelection(
+            usable=False,
+            spot=None,
+            source="none",
+            reason="last-trade timestamp is unavailable",
+        )
+
+    if trade_age > max_trade_age_seconds:
+        return SpotSelection(
+            usable=False,
+            spot=None,
+            source="none",
+            reason="last trade is stale",
+        )
+
+    if trade_age < -5:
+        return SpotSelection(
+            usable=False,
+            spot=None,
+            source="none",
+            reason="last-trade timestamp is in the future",
+        )
+
+    warnings.append("bid-ask market was unavailable; current last trade was used")
 
     return SpotSelection(
-        usable=False,
-        spot=None,
-        source="none",
-        warnings=(),
-        reason=(
-            "underlying quote did not contain a usable bid-ask "
-            "market or last trade"
-        ),
+        usable=True,
+        spot=last,
+        source="last_trade",
+        reason="a current last trade was available",
+        warnings=tuple(warnings),
     )
 
 
 def expiration_timestamp(
-    expiration: str,
+    expiration: str | date,
 ) -> datetime:
-    """Return 4:00 PM New York time for an ISO expiration date."""
+    """Return the option expiration at 4 PM New York time."""
 
-    try:
-        expiration_date = date.fromisoformat(
-            expiration.strip()
-        )
-    except ValueError as exc:
-        raise ValueError(
-            "expiration must be an ISO date such as 2026-08-21"
-        ) from exc
+    if isinstance(expiration, date):
+        expiration_date = expiration
 
-    local_expiration = datetime.combine(
+    else:
+        expiration_date = date.fromisoformat(expiration.strip())
+
+    local_close = datetime.combine(
         expiration_date,
-        DEFAULT_EXPIRATION_TIME,
-        tzinfo=NEW_YORK_TIME,
+        time(16, 0),
+        tzinfo=NEW_YORK,
     )
 
-    return local_expiration.astimezone(UTC)
+    return local_close.astimezone(UTC)
 
 
 def calculate_time_to_expiration(
-    expiration: str,
+    expiration: str | date,
     *,
     now: datetime | None = None,
 ) -> ExpirationCalculation:
-    """Calculate remaining calendar time in seconds, days, and years."""
+    """Calculate time remaining before expiration."""
 
-    current_time = now or datetime.now(UTC)
-
-    if current_time.tzinfo is None:
-        current_time = current_time.replace(tzinfo=UTC)
-    else:
-        current_time = current_time.astimezone(UTC)
+    current_time = _as_utc(now) or datetime.now(UTC)
 
     expiration_time = expiration_timestamp(expiration)
-    seconds_remaining = (
-        expiration_time - current_time
-    ).total_seconds()
+
+    seconds_remaining = (expiration_time - current_time).total_seconds()
 
     if seconds_remaining <= 0:
-        raise ValueError(
-            "expiration has already passed"
-        )
+        raise ValueError("expiration has already passed")
 
     return ExpirationCalculation(
         expiration_timestamp=expiration_time,
         seconds_remaining=seconds_remaining,
-        days_remaining=(
-            seconds_remaining / (24.0 * 60.0 * 60.0)
-        ),
-        years_remaining=(
-            seconds_remaining / SECONDS_PER_YEAR
-        ),
+        days_remaining=(seconds_remaining / 86400.0),
+        years_remaining=(seconds_remaining / SECONDS_PER_YEAR),
+    )
+
+
+def summarize_chain_timestamps(
+    frame: pd.DataFrame,
+    *,
+    column: str = "quote_timestamp",
+    maximum_missing_fraction: float = 0.25,
+    maximum_internal_span_seconds: float = 900.0,
+) -> ChainTimestampSummary:
+    """Validate the timestamps across an option chain."""
+
+    if frame.empty:
+        return ChainTimestampSummary(
+            usable=False,
+            representative_timestamp=None,
+            newest_timestamp=None,
+            oldest_timestamp=None,
+            valid_count=0,
+            missing_count=0,
+            reason="option chain is empty",
+        )
+
+    if column not in frame.columns:
+        return ChainTimestampSummary(
+            usable=False,
+            representative_timestamp=None,
+            newest_timestamp=None,
+            oldest_timestamp=None,
+            valid_count=0,
+            missing_count=len(frame),
+            reason=(f"option chain does not contain {column}"),
+        )
+
+    parsed_timestamps = pd.to_datetime(
+        frame[column],
+        utc=True,
+        errors="coerce",
+    )
+
+    valid_timestamps = parsed_timestamps.dropna()
+
+    missing_count = int(parsed_timestamps.isna().sum())
+
+    if valid_timestamps.empty:
+        return ChainTimestampSummary(
+            usable=False,
+            representative_timestamp=None,
+            newest_timestamp=None,
+            oldest_timestamp=None,
+            valid_count=0,
+            missing_count=missing_count,
+            reason=("option chain contains no valid quote timestamps"),
+        )
+
+    missing_fraction = missing_count / len(frame)
+
+    oldest_timestamp = valid_timestamps.min().to_pydatetime()
+
+    newest_timestamp = valid_timestamps.max().to_pydatetime()
+
+    sorted_timestamps = valid_timestamps.sort_values()
+
+    middle_index = len(sorted_timestamps) // 2
+
+    representative_timestamp = sorted_timestamps.iloc[middle_index].to_pydatetime()
+
+    internal_span_seconds = (newest_timestamp - oldest_timestamp).total_seconds()
+
+    warnings: list[str] = []
+
+    if missing_count:
+        warnings.append(f"{missing_count} of {len(frame)} option rows have missing timestamps")
+
+    if missing_fraction > maximum_missing_fraction:
+        return ChainTimestampSummary(
+            usable=False,
+            representative_timestamp=(representative_timestamp),
+            newest_timestamp=newest_timestamp,
+            oldest_timestamp=oldest_timestamp,
+            valid_count=len(valid_timestamps),
+            missing_count=missing_count,
+            reason=(
+                f"{missing_fraction:.1%} of option "
+                "timestamps are missing, above the "
+                f"{maximum_missing_fraction:.1%} limit"
+            ),
+            warnings=tuple(warnings),
+        )
+
+    if internal_span_seconds > maximum_internal_span_seconds:
+        return ChainTimestampSummary(
+            usable=False,
+            representative_timestamp=(representative_timestamp),
+            newest_timestamp=newest_timestamp,
+            oldest_timestamp=oldest_timestamp,
+            valid_count=len(valid_timestamps),
+            missing_count=missing_count,
+            reason=(
+                "option quote timestamps span "
+                f"{internal_span_seconds:.1f} seconds, "
+                "above the "
+                f"{maximum_internal_span_seconds:.1f}"
+                "-second limit"
+            ),
+            warnings=tuple(warnings),
+        )
+
+    return ChainTimestampSummary(
+        usable=True,
+        representative_timestamp=(representative_timestamp),
+        newest_timestamp=newest_timestamp,
+        oldest_timestamp=oldest_timestamp,
+        valid_count=len(valid_timestamps),
+        missing_count=missing_count,
+        reason=("option quote timestamps are internally consistent"),
+        warnings=tuple(warnings),
+    )
+
+
+def validate_market_synchronization(
+    quote: UnderlyingQuote,
+    chain: ChainTimestampSummary,
+    *,
+    maximum_difference_seconds: float = 300.0,
+) -> MarketSynchronization:
+    """Compare the stock quote time with the option-chain time."""
+
+    underlying_timestamps = [
+        timestamp
+        for timestamp in (
+            _as_utc(quote.bid_timestamp),
+            _as_utc(quote.ask_timestamp),
+        )
+        if timestamp is not None
+    ]
+
+    if not chain.usable or chain.representative_timestamp is None:
+        return MarketSynchronization(
+            synchronized=False,
+            time_difference_seconds=None,
+            underlying_timestamp=(max(underlying_timestamps) if underlying_timestamps else None),
+            chain_timestamp=(chain.representative_timestamp),
+            reason=(f"option timestamp validation failed: {chain.reason}"),
+            warnings=chain.warnings,
+        )
+
+    if not underlying_timestamps:
+        return MarketSynchronization(
+            synchronized=False,
+            time_difference_seconds=None,
+            underlying_timestamp=None,
+            chain_timestamp=(chain.representative_timestamp),
+            reason=("underlying bid-ask timestamps are unavailable"),
+        )
+
+    underlying_timestamp = max(underlying_timestamps)
+
+    time_difference_seconds = abs(
+        (underlying_timestamp - chain.representative_timestamp).total_seconds()
+    )
+
+    if time_difference_seconds > maximum_difference_seconds:
+        return MarketSynchronization(
+            synchronized=False,
+            time_difference_seconds=(time_difference_seconds),
+            underlying_timestamp=(underlying_timestamp),
+            chain_timestamp=(chain.representative_timestamp),
+            reason=(
+                "underlying and option quotes differ by "
+                f"{time_difference_seconds:.1f} seconds, "
+                "above the "
+                f"{maximum_difference_seconds:.1f}"
+                "-second limit"
+            ),
+            warnings=chain.warnings,
+        )
+
+    return MarketSynchronization(
+        synchronized=True,
+        time_difference_seconds=(time_difference_seconds),
+        underlying_timestamp=(underlying_timestamp),
+        chain_timestamp=(chain.representative_timestamp),
+        reason=("underlying and option quotes are from the same time window"),
+        warnings=chain.warnings,
     )
