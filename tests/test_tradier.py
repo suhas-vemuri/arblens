@@ -26,13 +26,16 @@ def test_missing_token_raises(
         lambda: False,
     )
     monkeypatch.delenv(
+        "TRADIER_TOKEN",
+        raising=False,
+    )
+    monkeypatch.delenv(
         "TRADIER_ACCESS_TOKEN",
         raising=False,
     )
-
     with pytest.raises(
         ValueError,
-        match="TRADIER_ACCESS_TOKEN is not configured",
+        match="Tradier token is not configured",
     ):
         TradierProvider()
 

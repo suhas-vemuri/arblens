@@ -334,11 +334,29 @@ def detect_put_call_parity_violations(
 def run_all_checks(
     frame: pd.DataFrame,
     *,
-    spot: float,
-    time: float,
+    spot: float | None,
+    time: float | None,
     rate: float,
     dividend_yield: float = 0.0,
 ) -> list[Violation]:
+    """Run every check that has the required market assumptions.
+
+    Monotonicity and butterfly checks depend only on the option chain.
+
+    Price-bound and put-call-parity checks also require a trustworthy
+    underlying price and a valid time to expiration.
+    """
+
+    violations = [
+        *detect_monotonicity_violations(frame),
+        *detect_executable_monotonicity_violations(frame),
+        *detect_butterfly_violations(frame),
+        *detect_executable_butterfly_violations(frame),
+    ]
+
+    if spot is None or time is None:
+        return violations
+
     return [
         *detect_price_bound_violations(
             frame,
@@ -354,10 +372,7 @@ def run_all_checks(
             rate=rate,
             dividend_yield=dividend_yield,
         ),
-        *detect_monotonicity_violations(frame),
-        *detect_executable_monotonicity_violations(frame),
-        *detect_butterfly_violations(frame),
-        *detect_executable_butterfly_violations(frame),
+        *violations,
         *detect_put_call_parity_violations(
             frame,
             spot=spot,
