@@ -8,6 +8,8 @@ import pandas as pd
 
 from arblens.cleaning import clean_quotes
 from arblens.detection import run_all_checks
+from arblens.execution import assess_opportunities
+from arblens.liquidity import LiquidityFilter, apply_liquidity_filters
 from arblens.market import (
     UnderlyingQuote,
     calculate_time_to_expiration,
@@ -15,13 +17,12 @@ from arblens.market import (
     summarize_chain_timestamps,
     validate_market_synchronization,
 )
+from arblens.models import OpportunityAssessment
 from arblens.providers.base import OptionChainProvider
 
 
 @dataclass(frozen=True, slots=True)
 class ExpirationScanResult:
-    """Summary of one expiration scan."""
-
     symbol: str
     expiration: str
     raw_rows: int
@@ -38,12 +39,14 @@ class ExpirationScanResult:
     midpoint_violation_count: int
     executable_violation_count: int
     error: str | None = None
+    liquid_rows: int = 0
+    liquidity_removed_rows: int = 0
+    opportunities_after_costs: int = 0
+    assessments: tuple[OpportunityAssessment, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class SymbolScanResult:
-    """Combined result for one symbol."""
-
     symbol: str
     requested_expirations: tuple[str, ...]
     completed_expirations: int
@@ -57,43 +60,24 @@ def select_expirations(
     requested_expirations: list[str] | None = None,
     maximum_expirations: int | None = None,
 ) -> list[str]:
-    """Choose which expirations should be scanned."""
-
     available = list(
-        dict.fromkeys(
-            expiration.strip()
-            for expiration in available_expirations
-            if expiration and expiration.strip()
-        )
+        dict.fromkeys(item.strip() for item in available_expirations if item and item.strip())
     )
-
     if requested_expirations is None:
         selected = available
-
     else:
         requested = list(
-            dict.fromkeys(
-                expiration.strip()
-                for expiration in requested_expirations
-                if expiration and expiration.strip()
-            )
+            dict.fromkeys(item.strip() for item in requested_expirations if item and item.strip())
         )
-
-        unavailable = [expiration for expiration in requested if expiration not in available]
-
+        unavailable = [item for item in requested if item not in available]
         if unavailable:
-            unavailable_text = ", ".join(unavailable)
-
-            raise ValueError(f"requested expirations are not available: {unavailable_text}")
-
+            raise ValueError("requested expirations are not available: " + ", ".join(unavailable))
         selected = requested
 
     if maximum_expirations is not None:
         if maximum_expirations <= 0:
             raise ValueError("maximum_expirations must be greater than zero")
-
         selected = selected[:maximum_expirations]
-
     return selected
 
 
@@ -101,51 +85,18 @@ def _get_underlying_quote(
     provider: OptionChainProvider,
     symbol: str,
 ) -> UnderlyingQuote | None:
-    """Fetch an underlying quote when supported."""
-
-    quote_method = getattr(
-        provider,
-        "get_underlying_quote",
-        None,
-    )
-
-    if not callable(quote_method):
+    method = getattr(provider, "get_underlying_quote", None)
+    if not callable(method):
         return None
-
     try:
-        quote = quote_method(symbol)
-
-    except (
-        NotImplementedError,
-        RuntimeError,
-        ValueError,
-    ):
+        quote = method(symbol)
+    except (NotImplementedError, RuntimeError, ValueError):
         return None
-
-    if not isinstance(
-        quote,
-        UnderlyingQuote,
-    ):
-        return None
-
-    return quote
+    return quote if isinstance(quote, UnderlyingQuote) else None
 
 
-def _count_price_basis(
-    violations: list[Any],
-    price_basis: str,
-) -> int:
-    """Count violations with one price basis."""
-
-    return sum(
-        getattr(
-            violation,
-            "price_basis",
-            None,
-        )
-        == price_basis
-        for violation in violations
-    )
+def _count_price_basis(violations: list[Any], price_basis: str) -> int:
+    return sum(getattr(item, "price_basis", None) == price_basis for item in violations)
 
 
 def scan_symbol_expirations(
@@ -158,104 +109,76 @@ def scan_symbol_expirations(
     rate: float = 0.04,
     dividend_yield: float = 0.0,
     maximum_sync_gap_seconds: float = 300.0,
+    liquidity_filter: LiquidityFilter | None = None,
+    contract_multiplier: int = 100,
+    commission_per_contract: float = 0.65,
+    fee_per_contract: float = 0.05,
+    minimum_net_edge: float = 0.0,
 ) -> SymbolScanResult:
-    """Scan several expirations for one symbol."""
-
     normalized_symbol = symbol.strip().upper()
-
     if not normalized_symbol:
         raise ValueError("symbol must not be empty")
-
     if maximum_sync_gap_seconds <= 0:
         raise ValueError("maximum_sync_gap_seconds must be greater than zero")
 
+    rules = liquidity_filter or LiquidityFilter()
+    rules.validate()
     current_time = captured_at or datetime.now(UTC)
+    current_time = (
+        current_time.replace(tzinfo=UTC)
+        if current_time.tzinfo is None
+        else current_time.astimezone(UTC)
+    )
 
-    if current_time.tzinfo is None:
-        current_time = current_time.replace(tzinfo=UTC)
-
-    else:
-        current_time = current_time.astimezone(UTC)
-
-    available_expirations = provider.get_expirations(normalized_symbol)
-
-    selected_expirations = select_expirations(
-        available_expirations,
+    selected = select_expirations(
+        provider.get_expirations(normalized_symbol),
         requested_expirations=expirations,
-        maximum_expirations=(maximum_expirations),
+        maximum_expirations=maximum_expirations,
     )
-
-    underlying_quote = _get_underlying_quote(
-        provider,
-        normalized_symbol,
-    )
-
-    spot_selection = None
-
-    if underlying_quote is not None:
-        spot_selection = select_underlying_spot(
-            underlying_quote,
-            now=current_time,
-        )
-
+    quote = _get_underlying_quote(provider, normalized_symbol)
+    selection = select_underlying_spot(quote, now=current_time) if quote else None
     results: list[ExpirationScanResult] = []
 
-    for expiration in selected_expirations:
+    for expiration in selected:
         try:
-            raw = provider.get_chain(
-                normalized_symbol,
-                expiration,
-            )
-
-            if not isinstance(
-                raw,
-                pd.DataFrame,
-            ):
+            raw = provider.get_chain(normalized_symbol, expiration)
+            if not isinstance(raw, pd.DataFrame):
                 raise TypeError("provider option chain must be a pandas DataFrame")
 
-            cleaned, quote_issues = clean_quotes(raw)
+            cleaned, issues = clean_quotes(raw)
+            liquid, liquidity = apply_liquidity_filters(cleaned, rules)
+            calculation = calculate_time_to_expiration(expiration, now=current_time)
+            chain_summary = summarize_chain_timestamps(raw)
 
-            quote_error_count = sum(issue.severity == "error" for issue in quote_issues)
+            sync_passed: bool | None = None
+            sync_reason = "underlying quote unavailable"
+            spot: float | None = None
 
-            quote_warning_count = sum(issue.severity == "warning" for issue in quote_issues)
-
-            expiration_calculation = calculate_time_to_expiration(
-                expiration,
-                now=current_time,
-            )
-
-            chain_timestamp_summary = summarize_chain_timestamps(raw)
-
-            synchronization_passed: bool | None = None
-
-            synchronization_reason = "underlying quote unavailable"
-
-            spot_for_checks: float | None = None
-
-            if underlying_quote is not None and spot_selection is not None:
-                synchronization = validate_market_synchronization(
-                    underlying_quote,
-                    chain_timestamp_summary,
-                    maximum_difference_seconds=(maximum_sync_gap_seconds),
+            if quote is not None and selection is not None:
+                sync = validate_market_synchronization(
+                    quote,
+                    chain_summary,
+                    maximum_difference_seconds=maximum_sync_gap_seconds,
                 )
+                sync_passed = sync.synchronized
+                sync_reason = sync.reason
+                if selection.usable and sync.synchronized:
+                    spot = selection.spot
 
-                synchronization_passed = synchronization.synchronized
-
-                synchronization_reason = synchronization.reason
-
-                if spot_selection.usable and synchronization.synchronized:
-                    spot_for_checks = spot_selection.spot
-
-            time_for_checks = (
-                expiration_calculation.years_remaining if spot_for_checks is not None else None
-            )
-
+            time_value = calculation.years_remaining if spot is not None else None
             violations = run_all_checks(
-                cleaned,
-                spot=spot_for_checks,
-                time=time_for_checks,
+                liquid,
+                spot=spot,
+                time=time_value,
                 rate=rate,
-                dividend_yield=(dividend_yield),
+                dividend_yield=dividend_yield,
+            )
+            assessments = assess_opportunities(
+                violations,
+                contract_multiplier=contract_multiplier,
+                commission_per_contract=commission_per_contract,
+                fee_per_contract=fee_per_contract,
+                minimum_net_edge=minimum_net_edge,
             )
 
             results.append(
@@ -264,35 +187,26 @@ def scan_symbol_expirations(
                     expiration=expiration,
                     raw_rows=len(raw),
                     clean_rows=len(cleaned),
-                    quote_issues=len(quote_issues),
-                    quote_errors=(quote_error_count),
-                    quote_warnings=(quote_warning_count),
-                    spot_used=spot_for_checks,
-                    time_to_expiration_years=(expiration_calculation.years_remaining),
-                    synchronization_passed=(synchronization_passed),
-                    synchronization_reason=(synchronization_reason),
-                    spot_dependent_checks_skipped=(spot_for_checks is None),
+                    quote_issues=len(issues),
+                    quote_errors=sum(item.severity == "error" for item in issues),
+                    quote_warnings=sum(item.severity == "warning" for item in issues),
+                    spot_used=spot,
+                    time_to_expiration_years=calculation.years_remaining,
+                    synchronization_passed=sync_passed,
+                    synchronization_reason=sync_reason,
+                    spot_dependent_checks_skipped=spot is None,
                     violation_count=len(violations),
-                    midpoint_violation_count=(
-                        _count_price_basis(
-                            violations,
-                            "midpoint",
-                        )
+                    midpoint_violation_count=_count_price_basis(violations, "midpoint"),
+                    executable_violation_count=_count_price_basis(violations, "bid_ask"),
+                    liquid_rows=len(liquid),
+                    liquidity_removed_rows=liquidity.removed_rows,
+                    opportunities_after_costs=sum(
+                        item.profitable_after_costs for item in assessments
                     ),
-                    executable_violation_count=(
-                        _count_price_basis(
-                            violations,
-                            "bid_ask",
-                        )
-                    ),
+                    assessments=tuple(assessments),
                 )
             )
-
-        except (
-            RuntimeError,
-            TypeError,
-            ValueError,
-        ) as exc:
+        except (RuntimeError, TypeError, ValueError) as exc:
             results.append(
                 ExpirationScanResult(
                     symbol=normalized_symbol,
@@ -305,7 +219,7 @@ def scan_symbol_expirations(
                     spot_used=None,
                     time_to_expiration_years=None,
                     synchronization_passed=None,
-                    synchronization_reason=("scan failed"),
+                    synchronization_reason="scan failed",
                     spot_dependent_checks_skipped=True,
                     violation_count=0,
                     midpoint_violation_count=0,
@@ -314,12 +228,11 @@ def scan_symbol_expirations(
                 )
             )
 
-    failed_expirations = sum(result.error is not None for result in results)
-
+    failed = sum(item.error is not None for item in results)
     return SymbolScanResult(
         symbol=normalized_symbol,
-        requested_expirations=tuple(selected_expirations),
-        completed_expirations=(len(results) - failed_expirations),
-        failed_expirations=(failed_expirations),
+        requested_expirations=tuple(selected),
+        completed_expirations=len(results) - failed,
+        failed_expirations=failed,
         results=tuple(results),
     )

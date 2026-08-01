@@ -4,14 +4,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from arblens.liquidity import LiquidityFilter
 from arblens.providers.base import OptionChainProvider
 from arblens.scanning import SymbolScanResult, scan_symbol_expirations
 
 
 @dataclass(frozen=True, slots=True)
 class WatchlistSymbolResult:
-    """Result of scanning one watchlist symbol."""
-
     symbol: str
     scan: SymbolScanResult | None
     error: str | None = None
@@ -19,51 +18,30 @@ class WatchlistSymbolResult:
 
 @dataclass(frozen=True, slots=True)
 class WatchlistScanResult:
-    """Combined result for all watchlist symbols."""
-
     requested_symbols: tuple[str, ...]
     completed_symbols: int
     failed_symbols: int
     results: tuple[WatchlistSymbolResult, ...]
 
 
-def normalize_symbols(
-    symbols: list[str],
-) -> list[str]:
-    """Clean, capitalize, and remove duplicate symbols."""
-
+def normalize_symbols(symbols: list[str]) -> list[str]:
     normalized: list[str] = []
-
     for symbol in symbols:
-        cleaned_symbol = symbol.strip().upper()
-
-        if not cleaned_symbol:
-            continue
-
-        if cleaned_symbol not in normalized:
-            normalized.append(cleaned_symbol)
-
+        cleaned = symbol.strip().upper()
+        if cleaned and cleaned not in normalized:
+            normalized.append(cleaned)
     return normalized
 
 
-def load_watchlist(
-    path: str | Path,
-) -> list[str]:
-    """Load one symbol from each line of a text file."""
-
-    watchlist_path = Path(path)
-
-    if not watchlist_path.exists():
-        raise ValueError(f"watchlist file does not exist: {watchlist_path}")
-
-    if not watchlist_path.is_file():
-        raise ValueError(f"watchlist path is not a file: {watchlist_path}")
-
-    symbols = normalize_symbols(watchlist_path.read_text(encoding="utf-8").splitlines())
-
+def load_watchlist(path: str | Path) -> list[str]:
+    source = Path(path)
+    if not source.exists():
+        raise ValueError(f"watchlist file does not exist: {source}")
+    if not source.is_file():
+        raise ValueError(f"watchlist path is not a file: {source}")
+    symbols = normalize_symbols(source.read_text(encoding="utf-8").splitlines())
     if not symbols:
         raise ValueError("watchlist does not contain any symbols")
-
     return symbols
 
 
@@ -76,24 +54,25 @@ def scan_watchlist(
     rate: float = 0.04,
     dividend_yield: float = 0.0,
     maximum_sync_gap_seconds: float = 300.0,
+    liquidity_filter: LiquidityFilter | None = None,
+    contract_multiplier: int = 100,
+    commission_per_contract: float = 0.65,
+    fee_per_contract: float = 0.05,
+    minimum_net_edge: float = 0.0,
 ) -> WatchlistScanResult:
-    """Scan several symbols without allowing one failure to stop the rest."""
-
-    normalized_symbols = normalize_symbols(symbols)
-
-    if not normalized_symbols:
+    normalized = normalize_symbols(symbols)
+    if not normalized:
         raise ValueError("at least one symbol is required")
 
     current_time = captured_at or datetime.now(UTC)
-
-    if current_time.tzinfo is None:
-        current_time = current_time.replace(tzinfo=UTC)
-    else:
-        current_time = current_time.astimezone(UTC)
-
+    current_time = (
+        current_time.replace(tzinfo=UTC)
+        if current_time.tzinfo is None
+        else current_time.astimezone(UTC)
+    )
     results: list[WatchlistSymbolResult] = []
 
-    for symbol in normalized_symbols:
+    for symbol in normalized:
         try:
             scan = scan_symbol_expirations(
                 provider,
@@ -102,34 +81,21 @@ def scan_watchlist(
                 captured_at=current_time,
                 rate=rate,
                 dividend_yield=dividend_yield,
-                maximum_sync_gap_seconds=(maximum_sync_gap_seconds),
+                maximum_sync_gap_seconds=maximum_sync_gap_seconds,
+                liquidity_filter=liquidity_filter,
+                contract_multiplier=contract_multiplier,
+                commission_per_contract=commission_per_contract,
+                fee_per_contract=fee_per_contract,
+                minimum_net_edge=minimum_net_edge,
             )
+            results.append(WatchlistSymbolResult(symbol=symbol, scan=scan))
+        except (RuntimeError, TypeError, ValueError) as exc:
+            results.append(WatchlistSymbolResult(symbol=symbol, scan=None, error=str(exc)))
 
-            results.append(
-                WatchlistSymbolResult(
-                    symbol=symbol,
-                    scan=scan,
-                )
-            )
-
-        except (
-            RuntimeError,
-            TypeError,
-            ValueError,
-        ) as exc:
-            results.append(
-                WatchlistSymbolResult(
-                    symbol=symbol,
-                    scan=None,
-                    error=str(exc),
-                )
-            )
-
-    failed_symbols = sum(result.error is not None for result in results)
-
+    failed = sum(item.error is not None for item in results)
     return WatchlistScanResult(
-        requested_symbols=tuple(normalized_symbols),
-        completed_symbols=(len(results) - failed_symbols),
-        failed_symbols=failed_symbols,
+        requested_symbols=tuple(normalized),
+        completed_symbols=len(results) - failed,
+        failed_symbols=failed,
         results=tuple(results),
     )
