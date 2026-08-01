@@ -1,0 +1,4 @@
+symbol,expiration,status,raw_rows,clean_rows,quote_issues,quote_errors,quote_warnings,spot_used,time_to_expiration_years,synchronization_passed,synchronization_reason,spot_checks_skipped,violations,midpoint_violations,executable_violations,error
+AAPL,2026-08-03,completed_chain_only,122,122,84,0,84,,0.007019504973395485,False,"option timestamp validation failed: option quote timestamps span 22360.0 seconds, above the 900.0-second limit",True,48,48,0,
+AAPL,2026-08-05,completed_chain_only,122,122,102,0,102,,0.012498957028190006,False,"option timestamp validation failed: option quote timestamps span 20343.0 seconds, above the 900.0-second limit",True,53,53,0,
+AAPL,2026-08-07,completed_chain_only,160,160,127,0,127,,0.017978409082984526,False,"option timestamp validation failed: option quote timestamps span 23394.0 seconds, above the 900.0-second limit",True,76,76,0,
