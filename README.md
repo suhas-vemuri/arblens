@@ -1,4 +1,4 @@
-# ArbLens
+# ArbLens — \[Launch Live Demo](https://arblens.streamlit.app)
 
 ## About ArbLens
 
@@ -6,14 +6,14 @@ ArbLens is an options-market integrity and static-arbitrage research platform bu
 
 The project evaluates:
 
-- Put-call parity
-- Strike monotonicity
-- Butterfly convexity
-- European option-price bounds
-- Quote quality and liquidity
-- Bid-ask executable pricing
-- Estimated transaction costs
-- Repeated-scan persistence
+* Put-call parity
+* Strike monotonicity
+* Butterfly convexity
+* European option-price bounds
+* Quote quality and liquidity
+* Bid-ask executable pricing
+* Estimated transaction costs
+* Repeated-scan persistence
 
 ArbLens first identifies theoretical pricing violations using midpoint prices. It then repeats the analysis using displayed bid prices for sales and ask prices for purchases. Finally, it subtracts estimated transaction costs and ranks the findings by modeled net edge.
 
@@ -25,18 +25,19 @@ The goal of ArbLens is not to promise profitable trades. Its purpose is to demon
 
 ## Technology
 
-- Python
-- Pandas
-- NumPy
-- Streamlit
-- Plotly
-- Tradier API
-- Pytest
-- Ruff
-- Git and GitHub
+* Python
+* Pandas
+* NumPy
+* Streamlit
+* Plotly
+* Tradier API
+* Pytest
+* Ruff
+* Git and GitHub
 
 ## Status
 
 **ArbLens is complete.**
 
 The final version includes the data provider, quote validation, liquidity screening, synchronization controls, static-arbitrage analysis, transaction-cost modeling, multi-symbol scanning, repeated scans, ranking, reporting, tests, documentation, and a deployed interactive dashboard.
+
